@@ -1,260 +1,278 @@
-//Sensors: MPU6050, HX711, HC-SR04
-#include <WiFi.h>
-#include <BlynkSimpleEsp32.h>
+#define BLYNK_TEMPLATE_ID "TMPL3czJnlmzo"
+#define BLYNK_TEMPLATE_NAME "Bridge Health Monitoring Shreyas"
+#define BLYNK_AUTH_TOKEN "SNkEqQ0cNqoatX91OtsrP_5WF4cJ7hNR"
+
 #include <Wire.h>
-#include <MPU6050.h>
-#include <HX711.h>
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <BlynkSimpleEsp32.h>
 
-char ssid[] = "YOUR_WIFI_SSID";
-char pass[] = "YOUR_WIFI_PASSWORD";
+// WiFi Credentials
+char ssid[] = "Rakesh Rocky";
+char pass[] = "nu1rs59j4k";
 
-char auth[] = "YOUR_BLYNK_AUTH_TOKEN";
+// MPU6250/6500
+#define MPU_ADDR 0x68
+// Ultrasonic - Updated Pin naming to match logic
+#define TRIG_PIN 12
+#define ECHO_PIN 14
+#define SOUND_SPEED 0.034
 
-MPU6050 mpu;
+#define RED_LED_1 4
+#define RED_LED_2 5
+#define BLUE_LED_1 2
+#define BLUE_LED_2 16
+#define GREEN_LED_1 0
+#define GREEN_LED_2 17
+#define Buzzer 19
 
-// HX711 Load Cell Configuration
-#define LOADCELL_DOUT_PIN  16
-#define LOADCELL_SCK_PIN   17
-HX711 scale;
+// MPU6050 Variables
+int16_t ax, ay, az, gx, gy, gz, tempRaw;
+float ax_off = 0, ay_off = 0, az_off = 0;
+float gx_off = 0, gy_off = 0, gz_off = 0;
+float temp_offset = 0;
+float roll = 0, pitch = 0;
+unsigned long prevTime = 0;
 
-// Ultrasonic Sensors for Crack Detection
-#define TRIG_PIN_1  25
-#define ECHO_PIN_1  26
-#define TRIG_PIN_2  27
-#define ECHO_PIN_2  14
+float crackThreshold = 3.0; 
+float baseDistance = 0;
+bool crackDetected = false;
 
-// Alert Thresholds
-#define VIBRATION_THRESHOLD 2.0      // g-force
-#define LOAD_THRESHOLD 5000.0        // kg
-#define CRACK_THRESHOLD 5.0          // cm (expanding crack)
-#define ANGULAR_VEL_THRESHOLD 50.0   // deg/s
+// Motion detection
+float accel_threshold = 0.2; 
+float gyro_threshold = 20.0;
 
-// Blynk Virtual Pins
-#define VPIN_VIBRATION_X    V0
-#define VPIN_VIBRATION_Y    V1
-#define VPIN_VIBRATION_Z    V2
-#define VPIN_LOAD           V3
-#define VPIN_CRACK_1        V4
-#define VPIN_CRACK_2        V5
-#define VPIN_GYRO_X         V6
-#define VPIN_GYRO_Y         V7
-#define VPIN_GYRO_Z         V8
-#define VPIN_ALERT_STATUS   V9
-#define VPIN_TEMPERATURE    V10
-
-// Global Variables
-float baselineAccel[3] = {0, 0, 0};
-float baselineCrack1 = 0;
-float baselineCrack2 = 0;
-String alertMessage = "";
-
+// Connection Flags & Timer
+bool isWiFiConnected = false;
+bool isBlynkConnected = false;
 BlynkTimer timer;
 
 void setup() {
   Serial.begin(115200);
+
+  // LED & Buzzer Setup
+  pinMode(RED_LED_1, OUTPUT);
+  pinMode(RED_LED_2, OUTPUT);
+  pinMode(BLUE_LED_1, OUTPUT);
+  pinMode(GREEN_LED_1, OUTPUT);
+  pinMode(GREEN_LED_2, OUTPUT);
+  pinMode(Buzzer, OUTPUT);
+  tone(Buzzer, 2000, 200);
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT); 
+
+  // MPU6050 Initialization
+  Wire.begin(21, 22);
+  delay(200);
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x6B);
+  Wire.write(0x00);
+  Wire.endTransmission(true);
+  Serial.println("MPU Initialized");
+
+  delay(2000);
+  calibrateIMU(); 
+  calibrateTemperature();
+
+  // --- NEW: Initialize Base Distance ---
+  baseDistance = getUltrasonicDistance();
+  // If first reading fails, set a default or retry
+  if(baseDistance <= 0) baseDistance = 20.0; 
+  Serial.print("Base Distance Set: ");
+  Serial.println(baseDistance);
+
+  prevTime = millis();
+
+  WiFi.begin(ssid, pass);
+  Blynk.config(BLYNK_AUTH_TOKEN);
   
-  // Initialize WiFi and Blynk
-  Serial.println("Connecting to WiFi...");
-  Blynk.begin(auth, ssid, pass);
-  
-  // Initialize I2C for MPU6050
-  Wire.begin();
-  
-  // Initialize MPU6050
-  Serial.println("Initializing MPU6050...");
-  mpu.initialize();
-  if (!mpu.testConnection()) {
-    Serial.println("MPU6050 connection failed!");
+  timer.setInterval(5000L, checkConnections);
+  timer.setInterval(1000L, sendDataToBlynk);
+}
+
+void checkConnections() {
+  if (WiFi.status() == WL_CONNECTED) {
+    isWiFiConnected = true;
+    digitalWrite(BLUE_LED_1, HIGH); 
+    digitalWrite(RED_LED_1, LOW);
   } else {
-    Serial.println("MPU6050 connected successfully");
-    calibrateMPU6050();
+    isWiFiConnected = false;
+    digitalWrite(BLUE_LED_1, LOW);
+    digitalWrite(RED_LED_1, HIGH);
+    WiFi.begin(ssid, pass);
   }
-  
-  // Initialize HX711 Load Cell
-  Serial.println("Initializing HX711...");
-  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
-  scale.set_scale(2280.f); // Calibration factor (adjust based on your load cell)
-  scale.tare(); // Reset to zero
-  
-  // Initialize Ultrasonic Sensors
-  pinMode(TRIG_PIN_1, OUTPUT);
-  pinMode(ECHO_PIN_1, INPUT);
-  pinMode(TRIG_PIN_2, OUTPUT);
-  pinMode(ECHO_PIN_2, INPUT);
-  
-  // Calibrate crack sensors (baseline measurement)
-  baselineCrack1 = measureDistance(TRIG_PIN_1, ECHO_PIN_1);
-  baselineCrack2 = measureDistance(TRIG_PIN_2, ECHO_PIN_2);
-  
-  // Setup timers
-  timer.setInterval(1000L, readSensorsAndSend);
-  timer.setInterval(5000L, checkAlerts);
-  
-  Serial.println("Bridge Monitoring System Ready!");
-  Blynk.virtualWrite(VPIN_ALERT_STATUS, "System Online");
+
+  isBlynkConnected = Blynk.connected();
+  if (isBlynkConnected) {
+    digitalWrite(GREEN_LED_1, HIGH);
+    Blynk.virtualWrite(V0, "SYSTEM ACTIVE");
+  } else {
+    digitalWrite(GREEN_LED_1, LOW);
+    if(isWiFiConnected) {
+      Blynk.connect();
+      Blynk.virtualWrite(V0, "SYSTEM OFFLINE");
+    }
+  }
 }
 
 void loop() {
-  Blynk.run();
   timer.run();
-}
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Blynk.run();
+  }
 
-// Calibrate MPU6050 to get baseline readings
-void calibrateMPU6050() {
-  Serial.println("Calibrating MPU6050...");
-  int16_t ax, ay, az, gx, gy, gz;
-  long axSum = 0, aySum = 0, azSum = 0;
-  int samples = 100;
-  
-  for (int i = 0; i < samples; i++) {
-    mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-    axSum += ax;
-    aySum += ay;
-    azSum += az;
-    delay(10);
-  }
-  
-  baselineAccel[0] = (float)axSum / samples / 16384.0;
-  baselineAccel[1] = (float)aySum / samples / 16384.0;
-  baselineAccel[2] = (float)azSum / samples / 16384.0;
-  
-  Serial.println("Calibration complete");
-}
+  readMPU();
 
-// Read all sensors and send to Blynk
-void readSensorsAndSend() {
-  // Read MPU6050 (Vibration and Angular Velocity)
-  int16_t ax, ay, az, gx, gy, gz;
-  mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+  // --- FIXED: Crack Detection Logic ---
+  float currentDistance = getUltrasonicDistance();
   
-  // Convert to g-force (acceleration)
-  float accelX = (float)ax / 16384.0 - baselineAccel[0];
-  float accelY = (float)ay / 16384.0 - baselineAccel[1];
-  float accelZ = (float)az / 16384.0 - baselineAccel[2];
-  
-  // Convert to degrees/second (gyroscope)
-  float gyroX = (float)gx / 131.0;
-  float gyroY = (float)gy / 131.0;
-  float gyroZ = (float)gz / 131.0;
-  
-  // Calculate vibration magnitude
-  float vibrationMag = sqrt(accelX*accelX + accelY*accelY + accelZ*accelZ);
-  
-  // Read Load Cell
-  float load = scale.get_units(5); // Average of 5 readings
-  if (load < 0) load = 0; // Ignore negative values
-  
-  // Read Ultrasonic Sensors (Crack Detection)
-  float crack1 = measureDistance(TRIG_PIN_1, ECHO_PIN_1);
-  float crack2 = measureDistance(TRIG_PIN_2, ECHO_PIN_2);
-  
-  // Calculate crack expansion
-  float crackExpansion1 = abs(crack1 - baselineCrack1);
-  float crackExpansion2 = abs(crack2 - baselineCrack2);
-  
-  // Read Temperature from MPU6050
-  int16_t rawTemp = mpu.getTemperature();
-  float temperature = (float)rawTemp / 340.0 + 36.53;
-  
-  // Send data to Blynk
-  Blynk.virtualWrite(VPIN_VIBRATION_X, accelX);
-  Blynk.virtualWrite(VPIN_VIBRATION_Y, accelY);
-  Blynk.virtualWrite(VPIN_VIBRATION_Z, accelZ);
-  Blynk.virtualWrite(VPIN_LOAD, load);
-  Blynk.virtualWrite(VPIN_CRACK_1, crackExpansion1);
-  Blynk.virtualWrite(VPIN_CRACK_2, crackExpansion2);
-  Blynk.virtualWrite(VPIN_GYRO_X, gyroX);
-  Blynk.virtualWrite(VPIN_GYRO_Y, gyroY);
-  Blynk.virtualWrite(VPIN_GYRO_Z, gyroZ);
-  Blynk.virtualWrite(VPIN_TEMPERATURE, temperature);
-  
-  // Debug output
-  Serial.printf("Vibration: %.2f g | Load: %.2f kg | Crack1: %.2f cm | Crack2: %.2f cm\n", 
-                vibrationMag, load, crackExpansion1, crackExpansion2);
-  Serial.printf("Gyro - X:%.2f Y:%.2f Z:%.2f deg/s | Temp: %.2f°C\n", 
-                gyroX, gyroY, gyroZ, temperature);
-}
+  if (currentDistance > 0) {
+    if (currentDistance > (baseDistance + crackThreshold)) {
+      crackDetected = true;
+    } else {
+      crackDetected = false;
+    }
+  }
 
-// Measure distance using ultrasonic sensor
-float measureDistance(int trigPin, int echoPin) {
-  digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
-  
-  long duration = pulseIn(echoPin, HIGH, 30000); // Timeout 30ms
-  if (duration == 0) return -1; // Sensor error
-  
-  float distance = duration * 0.034 / 2; // Convert to cm
-  return distance;
-}
+  unsigned long currentTime = millis();
+  float dt = (currentTime - prevTime) / 1000.0;
+  prevTime = currentTime;
 
-// Check for alert conditions
-void checkAlerts() {
-  alertMessage = "";
-  bool alertTriggered = false;
-  
-  // Read current sensor values
-  int16_t ax, ay, az, gx, gy, gz;
-  mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-  
-  float accelX = (float)ax / 16384.0 - baselineAccel[0];
-  float accelY = (float)ay / 16384.0 - baselineAccel[1];
-  float accelZ = (float)az / 16384.0 - baselineAccel[2];
-  float vibrationMag = sqrt(accelX*accelX + accelY*accelY + accelZ*accelZ);
-  
-  float gyroX = abs((float)gx / 131.0);
-  float gyroY = abs((float)gy / 131.0);
-  float gyroZ = abs((float)gz / 131.0);
-  
-  float load = scale.get_units(5);
-  float crack1 = abs(measureDistance(TRIG_PIN_1, ECHO_PIN_1) - baselineCrack1);
-  float crack2 = abs(measureDistance(TRIG_PIN_2, ECHO_PIN_2) - baselineCrack2);
-  
-  // Check vibration threshold
-  if (vibrationMag > VIBRATION_THRESHOLD) {
-    alertMessage += "⚠ HIGH VIBRATION! ";
-    alertTriggered = true;
+  float ax_g = (ax - ax_off) / 16384.0;
+  float ay_g = (ay - ay_off) / 16384.0;
+  float az_g = (az - az_off) / 16384.0;
+  float gx_dps = (gx - gx_off) / 131.0;
+  float gy_dps = (gy - gy_off) / 131.0;
+  float gz_dps = (gz - gz_off) / 131.0;
+
+  float temperature = ((tempRaw / 340.0) + 36.53) - temp_offset;
+
+  float roll_acc = atan2(ay_g, az_g) * 57.3;
+  float pitch_acc = atan2(-ax_g, sqrt(ay_g * ay_g + az_g * az_g)) * 57.3;
+
+  float alpha = 0.98;
+  roll = alpha * (roll + gx_dps * dt) + (1 - alpha) * roll_acc;
+  pitch = alpha * (pitch + gy_dps * dt) + (1 - alpha) * pitch_acc;
+
+  float accel_mag = sqrt(ax_g*ax_g + ay_g*ay_g + az_g*az_g);
+  bool motionDetected = false;
+
+  if (fabs(accel_mag - 1.0) > accel_threshold ||
+      fabs(gx_dps) > gyro_threshold ||
+      fabs(gy_dps) > gyro_threshold ||
+      fabs(gz_dps) > gyro_threshold) {
+    motionDetected = true;
   }
-  
-  // Check load threshold
-  if (load > LOAD_THRESHOLD) {
-    alertMessage += "⚠ OVERLOAD! ";
-    alertTriggered = true;
-  }
-  
-  // Check crack expansion
-  if (crack1 > CRACK_THRESHOLD || crack2 > CRACK_THRESHOLD) {
-    alertMessage += "⚠ CRACK EXPANSION DETECTED! ";
-    alertTriggered = true;
-  }
-  
-  // Check angular velocity (twisting/turning)
-  if (gyroX > ANGULAR_VEL_THRESHOLD || gyroY > ANGULAR_VEL_THRESHOLD || gyroZ > ANGULAR_VEL_THRESHOLD) {
-    alertMessage += "⚠ EXCESSIVE DEFLECTION! ";
-    alertTriggered = true;
-  }
-  
-  // Send alert to Blynk
-  if (alertTriggered) {
-    Blynk.virtualWrite(VPIN_ALERT_STATUS, alertMessage);
-    Blynk.logEvent("bridge_alert", alertMessage); // Requires Blynk event setup
-    Serial.println("ALERT: " + alertMessage);
+
+  // Updated Alarm Logic to include crack detection
+  if (motionDetected || abs(roll) > 45 || crackDetected) {
+    tone(Buzzer, 2000);
+    digitalWrite(RED_LED_2, HIGH);
+    digitalWrite(GREEN_LED_2, LOW);
   } else {
-    Blynk.virtualWrite(VPIN_ALERT_STATUS, "All systems normal");
+    noTone(Buzzer);
+    digitalWrite(RED_LED_2, LOW);
+    digitalWrite(GREEN_LED_2, HIGH);
+  }
+
+  // if(crackDetected){
+  //   tone(Buzzer, 2000);
+  //   digitalWrite(RED_LED_2, HIGH);
+  //   digitalWrite(GREEN_LED_2, LOW);
+  // }else{
+  //   noTone(Buzzer);
+  //   digitalWrite(RED_LED_2, LOW);
+  //   digitalWrite(GREEN_LED_2, HIGH);
+  // }
+
+  // Serial Monitor
+  Serial.print("Temp: "); Serial.print(temperature, 2);
+  Serial.print(" | Roll: "); Serial.print(roll, 2);
+  Serial.print(" | Pitch: "); Serial.print(pitch, 2);
+  Serial.print(" | Motion: "); Serial.print(motionDetected ? "YES" : "NO");
+  Serial.print(" | Crack: "); Serial.print(crackDetected ? "YES" : "NO");
+  Serial.print(" | Dist: "); Serial.print(currentDistance);
+  Serial.println();
+
+  delay(100);
+}
+
+void sendDataToBlynk() {
+  float ax_g = (ax - ax_off) / 16384.0;
+  float ay_g = (ay - ay_off) / 16384.0;
+  float az_g = (az - az_off) / 16384.0;
+  float gx_dps = (gx - gx_off) / 131.0;
+  float gy_dps = (gy - gy_off) / 131.0;
+  float gz_dps = (gz - gz_off) / 131.0;
+  float accel_mag = sqrt(ax_g*ax_g + ay_g*ay_g + az_g*az_g);
+
+  float temperature = ((tempRaw / 340.0) + 36.53) - temp_offset;
+  bool motionDetected = false;
+  if (fabs(accel_mag - 1.0) > accel_threshold ||
+      fabs(gx_dps) > gyro_threshold ||
+      fabs(gy_dps) > gyro_threshold ||
+      fabs(gz_dps) > gyro_threshold) {
+    motionDetected = true;
+  }
+
+  if (Blynk.connected()) {
+    Blynk.virtualWrite(V1, temperature);
+    Blynk.virtualWrite(V2, roll);
+    Blynk.virtualWrite(V3, pitch);
+    Blynk.virtualWrite(V4, motionDetected ? 255 : 0);
+    Blynk.virtualWrite(V5, crackDetected ? 255 : 0);
   }
 }
 
-// Blynk function to reset baseline (can be triggered from app)
-BLYNK_WRITE(V11) {
-  int resetValue = param.asInt();
-  if (resetValue == 1) {
-    calibrateMPU6050();
-    scale.tare();
-    baselineCrack1 = measureDistance(TRIG_PIN_1, ECHO_PIN_1);
-    baselineCrack2 = measureDistance(TRIG_PIN_2, ECHO_PIN_2);
-    Blynk.virtualWrite(VPIN_ALERT_STATUS, "Baseline Reset Complete");
-    Serial.println("System recalibrated");
+void readMPU() {
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x3B);
+  Wire.endTransmission(false);
+  Wire.requestFrom(MPU_ADDR, 14, true);
+  ax = Wire.read() << 8 | Wire.read();
+  ay = Wire.read() << 8 | Wire.read();
+  az = Wire.read() << 8 | Wire.read();
+  tempRaw = Wire.read() << 8 | Wire.read();
+  gx = Wire.read() << 8 | Wire.read();
+  gy = Wire.read() << 8 | Wire.read();
+  gz = Wire.read() << 8 | Wire.read();
+}
+
+void calibrateIMU() {
+  int samples = 500;
+  for (int i = 0; i < samples; i++) {
+    readMPU();
+    ax_off += ax; ay_off += ay; az_off += (az - 16384);
+    gx_off += gx; gy_off += gy; gz_off += gz;
+    delay(5);
   }
+  ax_off /= samples; ay_off /= samples; az_off /= samples;
+  gx_off /= samples; gy_off /= samples; gz_off /= samples;
+}
+
+void calibrateTemperature() {
+  long sum = 0;
+  for (int i = 0; i < 100; i++) {
+    readMPU(); sum += tempRaw; delay(10);
+  }
+  float avgRaw = sum / 100.0;
+  float measured = (avgRaw / 340.0) + 36.53;
+  temp_offset = measured - 30.0;
+}
+
+float getUltrasonicDistance() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  
+  // 26ms timeout avoids huge junk values if echo is missed
+  long duration = pulseIn(ECHO_PIN, HIGH, 26000); 
+  
+  if (duration <= 0) return -1.0; 
+  
+  return (duration * SOUND_SPEED) / 2.0;
 }
