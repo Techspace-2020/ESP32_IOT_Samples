@@ -1,0 +1,283 @@
+#define TX1 26
+
+#define TX2 27
+
+#define ECHO_PIN 34
+
+#define BUZZER_PIN 12
+
+#define LED_PIN 13
+
+
+
+#define PROBE_DISTANCE_M 0.10
+
+
+
+volatile uint32_t echo_time = 0;
+
+volatile bool echo_received = false;
+
+volatile uint32_t start_time = 0;
+
+
+
+// High-speed Hardware Interrupt Service Routine executed directly from internal RAM
+
+void IRAM_ATTR echoISR() {
+
+  if (!echo_received) {
+
+    echo_time = micros() - start_time;
+
+    echo_received = true;
+
+  }
+
+}
+
+
+
+// Generates a 10-cycle 41.6kHz differential push-pull acoustic pulse train
+
+void sendBurst() {
+
+  for (int i = 0; i < 10; i++) {
+
+    digitalWrite(TX1, HIGH);
+
+    digitalWrite(TX2, LOW);
+
+    delayMicroseconds(12);
+
+    digitalWrite(TX1, LOW);
+
+    digitalWrite(TX2, HIGH);
+
+    delayMicroseconds(12);
+
+  }
+
+  digitalWrite(TX1, LOW);
+
+  digitalWrite(TX2, LOW);
+
+}
+
+
+
+void setup() {
+
+  Serial.begin(115200);
+
+  
+
+  pinMode(TX1, OUTPUT);
+
+  pinMode(TX2, OUTPUT);
+
+  pinMode(BUZZER_PIN, OUTPUT);
+
+  pinMode(LED_PIN, OUTPUT);
+
+  pinMode(ECHO_PIN, INPUT);
+
+  
+
+  // Connect falling/rising digital edge changes to high-speed interrupt block
+
+  attachInterrupt(ECHO_PIN, echoISR, RISING);
+
+  
+
+  // Initialization alert signal to confirm circuit stability
+
+  digitalWrite(BUZZER_PIN, HIGH);
+
+  delay(100);
+
+  digitalWrite(BUZZER_PIN, LOW);
+
+  
+
+  Serial.println("UPV Concrete System Initialized");
+
+}
+
+
+
+void loop() {
+
+  const int samples = 10;
+
+  uint32_t total_time = 0;
+
+  int valid = 0;
+
+
+
+  for (int s = 0; s < samples; s++) {
+
+    echo_received = false;
+
+
+
+    sendBurst();
+
+    start_time = micros();
+
+
+
+    // Asynchronous listening window wrapper with a 5000 microsecond limit
+
+    uint32_t timeout = micros();
+
+    while (!echo_received && (micros() - timeout < 5000)) {}
+
+
+
+    if (echo_received) {
+
+      Serial.print("Sample [");
+
+      Serial.print(s);
+
+      Serial.print("] Verified TOF: ");
+
+      Serial.print(echo_time);
+
+      Serial.println(" us");
+
+
+
+      // Apply digital band filter boundaries to reject cross-talk and shear waves
+
+      if (echo_time > 10 && echo_time < 5000) {
+
+        total_time += echo_time;
+
+        valid++;
+
+      }
+
+    } else {
+
+      Serial.print("Sample [");
+
+      Serial.print(s);
+
+      Serial.println("] Error: Echo Signal Missing");
+
+    }
+
+    delay(60);
+
+  }
+
+
+
+  // Finalize batch analysis and execute mathematical conversion structures
+
+  if (valid > 0) {
+
+    float avg_us = (float)total_time / valid;
+
+    
+
+    // Velocity kinematic model: Distance divided by Time parameter
+
+    float velocity = PROBE_DISTANCE_M / (avg_us / 1e6);
+
+
+
+    // Exponential regression algorithm for concrete strength prediction
+
+    float predicted_strength = 1.42 * exp(0.00083 * velocity);
+
+
+
+    Serial.println("=========================================");
+
+    Serial.print("Calculated Average TOF : "); 
+
+    Serial.print(avg_us, 1); 
+
+    Serial.println(" us");
+
+    Serial.print("Computed Wave Velocity : "); 
+
+    Serial.print(velocity, 0); 
+
+    Serial.println(" m/s");
+
+    Serial.print("Predicted Comp. Strength: "); 
+
+    Serial.print(predicted_strength, 2); 
+
+    Serial.println(" MPa");
+
+
+
+    // Structural material classification logic block
+
+    String q;
+
+    if (velocity > 4500) {
+
+      q = "EXCELLENT";
+
+      digitalWrite(LED_PIN, HIGH); // Confirm structural readiness
+
+    } else if (velocity > 3500) {
+
+      q = "GOOD";
+
+      digitalWrite(LED_PIN, HIGH); // Confirm structural readiness
+
+    } else if (velocity > 3000) {
+
+      q = "MEDIUM";
+
+      digitalWrite(LED_PIN, LOW);
+
+    } else if (velocity > 2000) {
+
+      q = "DOUBTFUL";
+
+      digitalWrite(LED_PIN, LOW);
+
+    } else {
+
+      q = "POOR";
+
+      digitalWrite(LED_PIN, LOW);
+
+    }
+
+
+
+    Serial.print("Material Classification: "); 
+
+    Serial.println(q);
+
+    Serial.println("=========================================");
+
+  } else {
+
+    Serial.println("Data Error: No Valid Acoustic Profiles Isolated.");
+
+    // Alert signal sequence to notify site crew of error status
+
+    digitalWrite(BUZZER_PIN, HIGH);
+
+    delay(500);
+
+    digitalWrite(BUZZER_PIN, LOW);
+
+  }
+
+
+
+  delay(4000); // 4-second delay before starting the next test sequence
+
+}
