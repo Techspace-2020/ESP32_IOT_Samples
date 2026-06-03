@@ -11,9 +11,10 @@
 char ssid[] = "Rakesh Rocky";
 char pass[] = "nu1rs59j4k";
 
-// Ultrasonic - Updated Pin naming to match logic
-#define TRIG_PIN 12
-#define ECHO_PIN 14
+// Hardware PIN Definitions from Core UPV Logic
+#define TX1 26
+#define TX2 27
+#define ECHO_PIN 34
 #define SOUND_SPEED 0.034
 
 #define RED_LED_1 4
@@ -24,15 +25,49 @@ char pass[] = "nu1rs59j4k";
 #define GREEN_LED_2 17
 #define Buzzer 19
 
+#define PROBE_DISTANCE_M 0.10
 
-float crackThreshold = 3.0; 
-float baseDistance = 0;
-bool crackDetected = false;
+// Global variables for UPV Interrupt handling
+volatile uint32_t echo_time = 0;
+volatile bool echo_received = false;
+volatile uint32_t start_time = 0;
+
+// Variables for calculated data to send to Blynk
+float blynk_avg_us = 0;
+float blynk_velocity = 0;
+float blynk_strength = 0;
+String blynk_quality = "UNKNOWN";
+
+// float crackThreshold = 3.0; 
+// float baseDistance = 0;
+// bool crackDetected = false;
 
 // Connection Flags & Timer
 bool isWiFiConnected = false;
 bool isBlynkConnected = false;
 BlynkTimer timer;
+
+// High-speed Hardware Interrupt Service Routine executed directly from internal RAM
+void IRAM_ATTR echoISR() {
+  if (!echo_received) {
+    echo_time = micros() - start_time;
+    echo_received = true;
+  }
+}
+
+// Generates a 10-cycle 41.6kHz differential push-pull acoustic pulse train
+void sendBurst() {
+  for (int i = 0; i < 10; i++) {
+    digitalWrite(TX1, HIGH);
+    digitalWrite(TX2, LOW);
+    delayMicroseconds(12);
+    digitalWrite(TX1, LOW);
+    digitalWrite(TX2, HIGH);
+    delayMicroseconds(12);
+  }
+  digitalWrite(TX1, LOW);
+  digitalWrite(TX2, LOW);
+}
 
 void setup() {
   Serial.begin(115200);
@@ -44,28 +79,33 @@ void setup() {
   pinMode(GREEN_LED_1, OUTPUT);
   pinMode(GREEN_LED_2, OUTPUT);
   pinMode(Buzzer, OUTPUT);
+  pinMode(TX1, OUTPUT);
+  pinMode(TX2, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
   tone(Buzzer, 2000, 200);
-
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT); 
 
   delay(2000);
 
-  // --- NEW: Initialize Base Distance ---
-  baseDistance = getUltrasonicDistance();
-  // If first reading fails, set a default or retry
-  if(baseDistance <= 0) baseDistance = 20.0; 
-  Serial.print("Base Distance Set: ");
-  Serial.println(baseDistance);
+  // Connect falling/rising digital edge changes to high-speed interrupt block
+  attachInterrupt(ECHO_PIN, echoISR, RISING);
+  
+  // Initialization alert signal to confirm circuit stability
+  digitalWrite(Buzzer, HIGH);
+  delay(100);
+  digitalWrite(Buzzer, LOW);
+  
+  Serial.println("UPV Concrete System Initialized");
 
-  prevTime = millis();
-
+  // Initialize Network Connections
   WiFi.begin(ssid, pass);
   Blynk.config(BLYNK_AUTH_TOKEN);
   
+  // Setup Timers (Replaced blocking delay loop with a non-blocking 4-second sensor poll)
   timer.setInterval(5000L, checkConnections);
+  timer.setInterval(4000L, performUPVAnalysis);
   timer.setInterval(1000L, sendDataToBlynk);
 }
+
 
 void checkConnections() {
   if (WiFi.status() == WL_CONNECTED) {
@@ -98,44 +138,104 @@ void loop() {
   if (WiFi.status() == WL_CONNECTED) {
     Blynk.run();
   }
-
-  readMPU();
-
-  // --- FIXED: Crack Detection Logic ---
-  float currentDistance = getUltrasonicDistance();
-  
-  if (currentDistance > 0) {
-    if (currentDistance > (baseDistance + crackThreshold)) {
-      crackDetected = true;
-    } else {
-      crackDetected = false;
-    }
-  }
-
-  Serial.print(" | Dist: "); Serial.print(currentDistance);
-  Serial.println();
-
-  delay(100);
 }
 
 void sendDataToBlynk() {
   if (Blynk.connected()) {
-    Blynk.virtualWrite(V5, crackDetected ? 255 : 0);
+    // Map your custom metrics to clean Virtual Pins on your dashboard
+    Blynk.virtualWrite(V1, blynk_avg_us);     // Average Time of Flight (us)
+    Blynk.virtualWrite(V2, blynk_velocity);   // Ultrasonic Wave Velocity (m/s)
+    Blynk.virtualWrite(V3, blynk_strength);   // Predicted Compressive Strength (MPa)
+    Blynk.virtualWrite(V4, blynk_quality);    // Qualitative Material Classification
   }
 }
 
 
-float getUltrasonicDistance() {
-  digitalWrite(TRIG_PIN, LOW);
-  delayMicroseconds(2);
-  digitalWrite(TRIG_PIN, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(TRIG_PIN, LOW);
-  
-  // 26ms timeout avoids huge junk values if echo is missed
-  long duration = pulseIn(ECHO_PIN, HIGH, 26000); 
-  
-  if (duration <= 0) return -1.0; 
-  
-  return (duration * SOUND_SPEED) / 2.0;
+// core UPV logic isolated into a clean timer function to protect WiFi/Blynk execution
+void performUPVAnalysis() {
+  const int samples = 10;
+  uint32_t total_time = 0;
+  int valid = 0;
+
+  for (int s = 0; s < samples; s++) {
+    echo_received = false;
+
+    sendBurst();
+    start_time = micros();
+
+    // Asynchronous listening window wrapper with a 5000 microsecond limit
+    uint32_t timeout = micros();
+    while (!echo_received && (micros() - timeout < 5000)) {}
+
+    if (echo_received) {
+      Serial.print("Sample [");
+      Serial.print(s);
+      Serial.print("] Verified TOF: ");
+      Serial.print(echo_time);
+      Serial.println(" us");
+
+      // Apply digital band filter boundaries to reject cross-talk and shear waves
+      if (echo_time > 10 && echo_time < 5000) {
+        total_time += echo_time;
+        valid++;
+      }
+    } else {
+      Serial.print("Sample [");
+      Serial.print(s);
+      Serial.println("] Error: Echo Signal Missing");
+    }
+    delay(60);
+  }
+
+  // Finalize batch analysis and execute mathematical conversion structures
+  if (valid > 0) {
+    blynk_avg_us = (float)total_time / valid;
+    
+    // Velocity kinematic model: Distance divided by Time parameter
+    blynk_velocity = PROBE_DISTANCE_M / (blynk_avg_us / 1e6);
+
+    // Exponential regression algorithm for concrete strength prediction
+    blynk_strength = 1.42 * exp(0.00083 * blynk_velocity);
+
+    Serial.println("=========================================");
+    Serial.print("Calculated Average TOF : "); 
+    Serial.print(blynk_avg_us, 1); 
+    Serial.println(" us");
+    Serial.print("Computed Wave Velocity : "); 
+    Serial.print(blynk_velocity, 0); 
+    Serial.println(" m/s");
+    Serial.print("Predicted Comp. Strength: "); 
+    Serial.print(blynk_strength, 2); 
+    Serial.println(" MPa");
+
+    // Structural material classification logic block
+    if (blynk_velocity > 4500) {
+      blynk_quality = "EXCELLENT";
+      digitalWrite(GREEN_LED_1, HIGH); // Confirm structural readiness
+    } else if (blynk_velocity > 3500) {
+      blynk_quality = "GOOD";
+      digitalWrite(GREEN_LED_2, HIGH); // Confirm structural readiness
+    } else if (blynk_velocity > 3000) {
+      blynk_quality = "MEDIUM";
+      digitalWrite(BLUE_LED_1, LOW);
+    } else if (blynk_velocity > 2000) {
+      blynk_quality = "DOUBTFUL";
+      digitalWrite(BLUE_LED_2, LOW);
+    } else {
+      blynk_quality = "POOR";
+      digitalWrite(RED_LED_1, LOW);
+    }
+
+    Serial.print("Material Classification: "); 
+    Serial.println(blynk_quality);
+    Serial.println("=========================================");
+  } else {
+    Serial.println("Data Error: No Valid Acoustic Profiles Isolated.");
+    blynk_quality = "ERROR";
+    
+    // Alert signal sequence to notify site crew of error status
+    digitalWrite(Buzzer, HIGH);
+    delay(500);
+    digitalWrite(Buzzer, LOW);
+  }
 }
