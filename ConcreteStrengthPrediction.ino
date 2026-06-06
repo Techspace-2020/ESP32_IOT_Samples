@@ -33,10 +33,10 @@ volatile bool echo_received = false;
 volatile uint32_t start_time = 0;
 
 // Variables for calculated data to send to Blynk
-float blynk_avg_us = 0;
-float blynk_velocity = 0;
-float blynk_strength = 0;
-String blynk_quality = "UNKNOWN";
+float avg_us = 0;
+float velocity = 0;
+float strength = 0;
+String quality = "UNKNOWN";
 
 // float crackThreshold = 3.0; 
 // float baseDistance = 0;
@@ -143,10 +143,10 @@ void loop() {
 void sendDataToBlynk() {
   if (Blynk.connected()) {
     // Map your custom metrics to clean Virtual Pins on your dashboard
-    Blynk.virtualWrite(V1, blynk_avg_us);     // Average Time of Flight (us)
-    Blynk.virtualWrite(V2, blynk_velocity);   // Ultrasonic Wave Velocity (m/s)
-    Blynk.virtualWrite(V3, blynk_strength);   // Predicted Compressive Strength (MPa)
-    Blynk.virtualWrite(V4, blynk_quality);    // Qualitative Material Classification
+    Blynk.virtualWrite(V1, avg_us);     // Average Time of Flight (us)
+    Blynk.virtualWrite(V2, velocity);   // Ultrasonic Wave Velocity (m/s)
+    Blynk.virtualWrite(V3, strength);   // Predicted Compressive Strength (MPa)
+    Blynk.virtualWrite(V4, quality);    // Qualitative Material Classification
   }
 }
 
@@ -189,49 +189,49 @@ void performUPVAnalysis() {
 
   // Finalize batch analysis and execute mathematical conversion structures
   if (valid > 0) {
-    blynk_avg_us = (float)total_time / valid;
+    avg_us = (float)total_time / valid;
     
     // Velocity kinematic model: Distance divided by Time parameter
-    blynk_velocity = PROBE_DISTANCE_M / (blynk_avg_us / 1e6);
+    velocity = PROBE_DISTANCE_M / (avg_us / 1e6);
 
     // Exponential regression algorithm for concrete strength prediction
-    blynk_strength = 1.42 * exp(0.00083 * blynk_velocity);
+    strength = 1.42 * exp(0.00083 * velocity);
 
     Serial.println("=========================================");
     Serial.print("Calculated Average TOF : "); 
-    Serial.print(blynk_avg_us, 1); 
+    Serial.print(avg_us, 1); 
     Serial.println(" us");
     Serial.print("Computed Wave Velocity : "); 
-    Serial.print(blynk_velocity, 0); 
+    Serial.print(velocity, 0); 
     Serial.println(" m/s");
     Serial.print("Predicted Comp. Strength: "); 
-    Serial.print(blynk_strength, 2); 
+    Serial.print(strength, 2); 
     Serial.println(" MPa");
 
     // Structural material classification logic block
-    if (blynk_velocity > 4500) {
-      blynk_quality = "EXCELLENT";
+    if (velocity > 4500) {
+      quality = "EXCELLENT";
       digitalWrite(GREEN_LED_1, HIGH); // Confirm structural readiness
-    } else if (blynk_velocity > 3500) {
-      blynk_quality = "GOOD";
+    } else if (velocity > 3500) {
+      quality = "GOOD";
       digitalWrite(GREEN_LED_2, HIGH); // Confirm structural readiness
-    } else if (blynk_velocity > 3000) {
-      blynk_quality = "MEDIUM";
+    } else if (velocity > 3000) {
+      quality = "MEDIUM";
       digitalWrite(BLUE_LED_1, LOW);
-    } else if (blynk_velocity > 2000) {
-      blynk_quality = "DOUBTFUL";
+    } else if (velocity > 2000) {
+      quality = "DOUBTFUL";
       digitalWrite(BLUE_LED_2, LOW);
     } else {
-      blynk_quality = "POOR";
+      quality = "POOR";
       digitalWrite(RED_LED_1, LOW);
     }
 
     Serial.print("Material Classification: "); 
-    Serial.println(blynk_quality);
+    Serial.println(quality);
     Serial.println("=========================================");
   } else {
     Serial.println("Data Error: No Valid Acoustic Profiles Isolated.");
-    blynk_quality = "ERROR";
+    quality = "ERROR";
     
     // Alert signal sequence to notify site crew of error status
     digitalWrite(Buzzer, HIGH);
